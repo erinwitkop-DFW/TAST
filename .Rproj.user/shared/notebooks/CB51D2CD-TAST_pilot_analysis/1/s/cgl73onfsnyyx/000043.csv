@@ -1,0 +1,7 @@
+"0","det <- det %>% select(-accumulation_period_s, -time_offset_h)"
+"0",""
+"0","# remove UTC time since we won't be using that for joining time"
+"0","# PDT_date and PDT_time were loaded correctly into DateTime format already and the columns are identical, removing one and changing the other column name to DateTime"
+"0","det <- det %>% select(-UTC_time, -device_time_UTC, -PDT_time) %>% rename(DateTime = PDT_date)"
+"0","det$date <- format(det$DateTime, ""%Y-%m-%d"")"
+"0",""

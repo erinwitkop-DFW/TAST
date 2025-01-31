@@ -1,0 +1,178 @@
+---
+title: "TAST_pilot_analysis"
+author: "Erin Witkop"
+date: "2024-10-31"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r setup}
+
+# load packages
+library(tidyverse)
+
+# set output directories
+fig_dir <- "./figures"
+result_dir <- "./results"
+data_dir <- "./raw_data"
+
+```
+
+
+
+```{r load_packages}
+library(tidyverse)
+library(readxl)
+library(lubridate)
+library(chron)
+library(oce)
+
+```
+
+
+```{r detections}
+# Load detections data
+det <- read_xlsx(file.path(data_dir, "Master detection file_TAST.xlsx"), sheet = 3)
+
+# remove extraneous columns at the end, removing data columns that I'm going to join
+colnames(det)
+det <- det[,c(1:6,13:22)]
+
+# rename columns for R
+colnames(det) <- c("receiver","temp_stats_desc","device_time_UTC","UTC_time","PDT_date","PDT_time","week_num_PDT","time_offset_h","time_correction_S","model","serial_number",
+                   "ambient_min_C","ambient_max_C","ambient_mean_C","sample_count","accumulation_period_s")
+
+# remove time offset and accumulation period columns which have no data
+det[!is.na(det$time_offset_h),] # all NA
+det[!is.na(det$accumulation_period_s),] # all NA
+det <- det %>% select(-accumulation_period_s, -time_offset_h)
+
+# remove UTC time since we won't be using that for joining time
+# PDT_date and PDT_time were loaded correctly into DateTime format already and the columns are identical, removing one and changing the other column name to DateTime
+det <- det %>% select(-UTC_time, -device_time_UTC, -PDT_time) %>% rename(DateTime = PDT_date)
+det$date <- format(det$DateTime, "%Y-%m-%d")
+
+```
+
+
+
+```{r sunrise_sunset}
+## LOAD SUNRISE SUNSET DATA
+
+# load sunrise sunset data and format
+daynight <- read_xlsx(file.path(data_dir, "Sunrise_sunset.xlsx")) %>% select(-DayLength, -DayLength_Diff.)
+
+# remove degree information from sunrise and sunset and format as time
+daynight <- daynight %>% separate(Sunrise, into = c("Sunrise","ampm"), sep="\ ") %>% select(-ampm) %>%
+  separate(Sunset, into = c("Sunset","ampm"), sep="\ ") %>% select(-ampm) %>%
+  # convert time to military 
+  mutate(Sunrise = paste0("0",Sunrise,":00")) %>%
+  separate(Sunset, into = c("Hour","Minute"), sep = ":") %>% mutate(Hour = as.numeric(Hour) + 12) %>%
+  mutate(Sunset = paste(Hour, Minute, "00", sep = ":")) %>% select(-Minute, -Hour) 
+
+# put sunrise and sunset data in datetime format using lubridate
+daynight$Sunrise <- with(daynight, ymd(Date) + hms(Sunrise))
+daynight$Sunset <- with(daynight, ymd(Date) + hms(Sunset))
+daynight <- daynight %>% rename(date = Date)
+
+## JOIN SUNRISE SUNSET WITH DET 
+# inner join by date
+daynight_sun <- inner_join(det, daynight ) # joining by date
+daynight_sun$date <- as.Date(daynight_sun$date)
+
+# compute day and night from sunrise sunset
+daynight_sun$daynight <- ifelse(daynight_sun$DateTime > daynight_sun$Sunrise & daynight_sun$DateTime < daynight_sun$Sunset, 'day', 'night')
+
+# how many day vs night detections
+daynight_sun %>% count(daynight) # more day than night detections
+
+
+```
+
+```{r tide_data}
+## LOAD TIDE DATA ### WAS UNSUCCESSFUL AT GETTING THIS JOINED CORRECTLY
+# load Rocky Point Eld inlet
+tides <- read_xlsx(file.path(data_dir, "Rocky_Point_Eld_Inlet_May_Aug.xlsx"))
+tides$Time <- lubridate::hms(format(tides$Time, "%H:%M:%S"))
+
+# create DateTime
+
+# Combine Tide data with detections data
+# the station we need is not part of this package I found unfortunately, so need to find an alternative method 
+install.packages("rtide")
+library(rtide)
+tide_stations()
+dat = tide_height('Rocky Point, Eld Inlet',from = as.Date('2024-05-01'), 
+        to = as.Date('2024-08-01'), minutes = 10, tz ='PST8PDT')
+
+```
+
+```{R CFS}
+
+## LOAD CFS DATA - date format is in datetime so this will load correctly 
+cfs <- read_xlsx(file.path(data_dir, "USGS_Deschutes_River_E_St_Bridge_Tumwater_12080010_Nov23_Nov_24.xlsx")) %>%
+  dplyr::rename("cfs" = "150759_00060") %>% select(datetime, cfs)
+
+## the CFS data doesn't exactly match up with when detections occurred, so I can't directly join the two datasets. 
+## Taking average daily cfs
+avg_cfs <- cfs %>%
+  mutate(date = as.Date(datetime)) %>%
+  group_by(date) %>%
+  summarize(avg_daily_cfs = mean(cfs))
+
+## Join avg daily CFS with detections
+det_join <- left_join(daynight_sun, avg_cfs)
+
+```
+
+
+```{r tast_reformat}
+## LOAD TAST ON/OFF
+# James sent a reformatted version of the original TAST data that made it more clear when it was turned on an off and the duration of on/off
+tast <- read_xlsx(file.path(data_dir, "UPDATED TAST schedule Olympia 2024.xlsx"), sheet = 1, ) %>%
+  # remove random time that was auto loaded
+  mutate(
+    start_time = hms::as_hms(start_time),
+    end_time = hms::as_hms(end_time)
+ ) %>%
+# combine times and date
+  mutate(start_date = ymd_hms(paste(start_date, format(as.POSIXct(start_time, tz = "UTC"), "%H:%M:%S"))),
+         end_date = ymd_hms(paste(end_date, format(as.POSIXct(end_time, tz = "UTC"), "%H:%M:%S")))) #%>%
+## create time intervals
+ # mutate(start_interval = interval(start_date, end_date))
+
+## Join by whether tast is between start_date and end_date
+det_join$DateTime <- as.POSIXct(det_join$DateTime)
+tast$start_date <- as.POSIXct(tast$start_date)
+tast$end_date <- as.POSIXct(tast$end_date)
+
+### keep getting errors in attempts to join below..need to keep troubleshooting. It should be working...
+library(fuzzyjoin)
+det_join %>% 
+fuzzy_left_join( tast,
+              by = c(
+                           "DateTime" =  "start_date",
+                           "DateTime" = "end_date"), 
+              match_fun = list('>=', '<='))
+
+## altnerate method also throws an error 
+library(sqldf)
+sqldf("SELECT * FROM tast
+            LEFT JOIN det_join
+            ON DateTime BETWEEN start_date AND end_date")
+
+
+
+```
+
+
+```{r release}
+## LOAD RELEASE GROUP DATA
+## Still need to join release group data 
+release <-  read_xlsx(file.path(data_dir, "Master detection file_TAST.xlsx"), sheet = 4)
+
+```

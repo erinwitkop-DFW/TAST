@@ -1,0 +1,9 @@
+"0","det_join %>% 
+fuzzy_left_join( tast,
+              by = c(
+                           ""DateTime"" =  ""start_date"",
+                           ""DateTime"" = ""end_date""), 
+              match_fun = list('>=', '<='))
+"
+"2","Error in which(m) : argument to 'which' is not logical
+"
